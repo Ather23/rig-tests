@@ -12,3 +12,4 @@ thiserror = "2.0.12"
 tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = "0.3.19"
 brave-rs = { path = "D:\\git_repos\\brave-rs" }
+reqwest = "0.12.23"

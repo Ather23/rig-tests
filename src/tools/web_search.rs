@@ -35,6 +35,8 @@ impl Tool for WebSearch {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let api_key = std::env::var("BRAVE_API_KEY").expect("BRAVE_API_KEY not set");
         let client = BraveClient::new(&api_key);
+
+        println!("Query: {}", &args.query);
         let result = client.web_search_by_query(&args.query).await?;
 
         let first_result = match &result.web {
