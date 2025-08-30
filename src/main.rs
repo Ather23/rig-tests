@@ -1,26 +1,97 @@
-use anyhow::Result;
-use rig::completion::Prompt;
-use rig::prelude::*;
-use rig::streaming::stream_to_stdout;
-use rig::{ completion::ToolDefinition, providers, streaming::StreamingPrompt, tool::Tool };
+use clap::Parser;
+use rig::providers::{ anthropic, gemini };
+use rig::{ prelude::*, providers };
+use rig::{
+    agent::Agent,
+    completion::{ CompletionError, CompletionModel, Prompt, PromptError, ToolDefinition },
+    extractor::Extractor,
+    message::Message,
+    providers::openai,
+    tool::Tool,
+};
+use schemars::JsonSchema;
 use serde::{ Deserialize, Serialize };
+use serde_json::json;
+use tracing;
 
 mod tools;
 use tools::web_search::*;
 use tools::rest_api::*;
-use crate::tools::{ ShellTool };
+use crate::tools::ShellTool;
+
+const CHAIN_OF_THOUGHT_PROMPT: &str =
+    "
+You are an assistant that extracts reasoning steps from a given prompt.
+Do not return text, only return a tool call.
+";
+
+#[derive(Deserialize, Serialize, Debug, Clone, JsonSchema)]
+struct ChainOfThoughtSteps {
+    steps: Vec<String>,
+}
+
+struct ReasoningAgent<M: CompletionModel> {
+    chain_of_thought_extractor: Extractor<M, ChainOfThoughtSteps>,
+    executor: Agent<M>,
+}
+
+impl<M: CompletionModel> Prompt for ReasoningAgent<M> {
+    #[allow(refining_impl_trait)]
+    async fn prompt(&self, prompt: impl Into<Message> + Send) -> Result<String, PromptError> {
+        let prompt: Message = prompt.into();
+        println!("prompt: {:?} \n", &prompt);
+
+        let mut chat_history = vec![prompt.clone()];
+        let extracted = self.chain_of_thought_extractor.extract(prompt).await.map_err(|e| {
+            tracing::error!("Extraction error: {:?}", e);
+            CompletionError::ProviderError("".into())
+        })?;
+        if extracted.steps.is_empty() {
+            return Ok("No reasoning steps provided.".into());
+        }
+        let mut reasoning_prompt = String::new();
+        for (i, step) in extracted.steps.iter().enumerate() {
+            reasoning_prompt.push_str(&format!("Step {}: {}\n", i + 1, step));
+        }
+        let response = self.executor
+            .prompt(reasoning_prompt.as_str())
+            .with_history(&mut chat_history)
+            .multi_turn(20).await?;
+        tracing::info!(
+            "full chat history generated: {}",
+            serde_json::to_string_pretty(&chat_history).unwrap()
+        );
+        Ok(response)
+    }
+}
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Name of the person to greet
+    #[arg(short, long)]
+    prompt: String,
+}
+
 #[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
-    tracing_subscriber::fmt().init();
+async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
 
-    let openai_client = providers::openai::Client::from_env();
+    // tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).with_target(false).init();
 
-    let rest_api_agent = openai_client
-        .agent(providers::openai::GPT_4)
+    // Create Anthropic client
+    let ai_client: anthropic::Client = anthropic::Client::from_env();
+
+    // Create agent with a preamble and available tools
+    let agent = ai_client
+        .agent(anthropic::CLAUDE_4_SONNET)
         .preamble(
-            "You are helpful assistant that has access to tools. 
-            You are going to help the user answer any questions using the tools provided.
-            You can also search the web for help."
+            "You are an assistant here to help the user select which tool is most appropriate to perform the task specified by the user.
+            Follow these instructions closely.
+            1. Consider the user's request carefully and identify the core elements of the request.
+            2. Select which tool among those made available to you is appropriate given the context.
+            3. This is very important: never perform the operation yourself.          
+            "
         )
         .max_tokens(1024)
         .tool(RestApiTool)
@@ -28,53 +99,10 @@ async fn main() -> Result<(), anyhow::Error> {
         .tool(ShellTool)
         .build();
 
-    // Create agent with a single context prompt and two tools
-    // let search_agent = providers::gemini::Client
-    //     ::from_env()
-    //     .agent(providers::gemini::completion::GEMINI_2_0_FLASH)
-    //     .preamble(r#"You are an urdu poet."#)
-    //     .max_tokens(1024)
-    //     .tool(WebSearch)
-    //     .tool(ShellTool)
-    //     .tool(UrduPoemTool)
-    //     .build();
+    // Prompt the agent and print the response using the command line argument
+    let result = agent.prompt(&args.prompt).multi_turn(20).await?;
 
-    // You are an agent that has access to PowerShell.
-    // You also have access to the web if you want to look up documentation.
-    // Make sure you respond in a nice and friendly way.
-
-    /**
-     * 
-     *             "You are an assistant here to help the user select which tool is most appropriate to perform arithmetic operations.
-            Follow these instructions closely.
-            1. Consider the user's request carefully and identify the core elements of the request.
-            2. Select which tool among those made available to you is appropriate given the context.
-            3. This is very important: never perform the operation yourself.
-            "
-     * 
-     */
-
-    // You are a web search agent that can return results based on users query. You also have shell access if you need it.
-    // "Call the REST API at https://jsonplaceholder.typicode.com/todos/1 and show the result."
-
-    let result = rest_api_agent
-        .prompt("Clone the langchain repo in D:\\test-rig-agent")
-        .multi_turn(20).await?;
-
-    println!("\n\nAgent Response: {result}");
-
-    // let mut stream = rest_api_agent.stream_prompt(
-    //     "Your tasks is to clone langchain repo in D:\\test-rig folder.
-    //     Create the folder if not there. Try to fix the command if its incorrect"
-    // ).await?;
-
-    // stream_to_stdout(&rest_api_agent, &mut stream).await?;
-
-    // if let Some(response) = stream.response {
-    //     println!("Usage: {:?} tokens", response.);
-    // }
-
-    // println!("Message: {:?}", stream.choice);
+    println!("\n\nReasoning Agent: {result}");
 
     Ok(())
 }

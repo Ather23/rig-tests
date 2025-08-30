@@ -29,7 +29,7 @@ impl Tool for ShellTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: "shell_tool".to_string(),
-            description: "Executes a shell command and returns the output.".to_string(),
+            description: "Executes a shell command on **Windows** and returns the output.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

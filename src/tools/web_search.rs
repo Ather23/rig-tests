@@ -47,6 +47,8 @@ impl Tool for WebSearch {
                     .unwrap_or_else(|| "No results found".to_string()),
             None => "No web results".to_string(),
         };
+
+        println!("search result {:?}", &first_result);
         Ok(first_result)
     }
 }
