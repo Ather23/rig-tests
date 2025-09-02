@@ -16,3 +16,6 @@ reqwest = "0.12.23"
 schemars = "0.8.22"
 tracing = "0.1.41"
 clap = { version = "4.5.46", features = ["derive"] }
+html2md = "0.2.15"
+chrono = "0.4.41"
+chrono-tz = "0.10.4"
