@@ -1,45 +1,72 @@
-use anyhow::Result;
-use rig::prelude::*;
-use rig::streaming::stream_to_stdout;
-use rig::{ completion::ToolDefinition, providers, streaming::StreamingPrompt, tool::Tool };
+use chrono::Utc;
+use clap::Parser;
+use rig::pipeline::new;
+use rig::providers::{ anthropic, gemini };
+use rig::{ prelude::*, providers };
+use rig::{
+    agent::Agent,
+    completion::{ CompletionError, CompletionModel, Prompt, PromptError, ToolDefinition },
+    extractor::Extractor,
+    message::Message,
+    providers::openai,
+    tool::Tool,
+};
+use schemars::JsonSchema;
 use serde::{ Deserialize, Serialize };
+use serde_json::json;
+use tracing;
 
 mod tools;
 use tools::web_search::*;
+use tools::rest_api::*;
+use crate::tools::link_to_markdown::LinkToMarkdown;
+use crate::tools::ShellTool;
+use chrono_tz::America::Toronto;
 
-use crate::tools::{ ShellTool, UrduPoemTool };
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Name of the person to greet
+    #[arg(short, long)]
+    prompt: String,
+}
+
 #[tokio::main]
-async fn main() -> Result<(), anyhow::Error> {
-    tracing_subscriber::fmt().init();
+async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
 
-    // Create agent with a single context prompt and two tools
-    let search_agent = providers::gemini::Client
-        ::from_env()
-        .agent(providers::gemini::completion::GEMINI_2_0_FLASH)
-        .preamble(r#"You are an urdu poet."#)
+    // tracing_subscriber::fmt().with_max_level(tracing::Level::DEBUG).with_target(false).init();
+
+    // Create Anthropic client
+    let ai_client: anthropic::Client = anthropic::Client::from_env();
+    let todays_date = chrono::Utc::now().with_timezone(&Toronto);
+
+    // Create agent with a preamble and available tools
+    let agent = ai_client
+        .agent(anthropic::CLAUDE_4_SONNET)
+        .preamble(
+            &format!(r#"
+            # Goal:
+            You are an assistant here to help the user select which tool is most appropriate to perform the task specified by the user.
+            Follow these instructions closely.
+            1. Consider the user's request carefully and identify the core elements of the request.
+            2. Select which tool among those made available to you is appropriate given the context.
+            3. This is very important: never perform the operation yourself.
+            
+            # Context: 
+            Todays date is: {}"#, todays_date)
+        )
         .max_tokens(1024)
+        .tool(RestApiTool)
         .tool(WebSearch)
         .tool(ShellTool)
-        .tool(UrduPoemTool)
+        .tool(LinkToMarkdown)
         .build();
 
-    // You are an agent that has access to PowerShell.
-    // You also have access to the web if you want to look up documentation.
-    // Make sure you respond in a nice and friendly way.
+    // Prompt the agent and print the response using the command line argument
+    let result = agent.prompt(&args.prompt).multi_turn(20).await?;
 
-    // You are a web search agent that can return results based on users query. You also have shell access if you need it.
-
-    let mut stream = search_agent.stream_prompt(
-        "Write something in the same prose as jaun elia"
-    ).await?;
-
-    stream_to_stdout(&search_agent, &mut stream).await?;
-
-    if let Some(response) = stream.response {
-        println!("Usage: {:?} tokens", response.usage_metadata.total_token_count);
-    }
-
-    println!("Message: {:?}", stream.choice);
+    println!("\n\nReasoning Agent: {result}");
 
     Ok(())
 }
